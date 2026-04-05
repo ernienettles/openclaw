@@ -21,6 +21,7 @@ import {
   requiresDiskPersistence,
   generatePreview,
 } from "../infra/tool-result-storage.js";
+import { isSedInPlaceCommand, previewSedInPlace } from "../infra/sed-safety.js";
 import { logInfo } from "../logger.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { splitShellArgs } from "../utils/shell-argv.js";
@@ -1558,6 +1559,20 @@ export function createExecTool(
         warnings.push(
           `Note: command pipeline contains write operations (mv/cp/rm/npm install etc.) — this is not a read-only command.`,
         );
+      }
+
+      // Sed safety: intercept sed in-place commands and apply them in Node.js.
+      // This gives us a preview of exactly what will change — the same content
+      // the user would see in Claude Code's permission dialog — without running sed.
+      if (isSedInPlaceCommand(params.command)) {
+        const previewResult = await previewSedInPlace(params.command);
+        if (previewResult.safe) {
+          warnings.push(
+            `[Sed in-place edit applied via Node.js — preview matches exact file content]`,
+          );
+        } else {
+          warnings.push(`[Sed in-place: ${previewResult.reason} — falling through to sed binary]`);
+        }
       }
 
       const run = await runExecProcess({
