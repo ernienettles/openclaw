@@ -16,6 +16,11 @@ import {
   getShellPathFromLoginShell,
   resolveShellEnvFallbackTimeoutMs,
 } from "../infra/shell-env.js";
+import {
+  persistToolResult,
+  requiresDiskPersistence,
+  generatePreview,
+} from "../infra/tool-result-storage.js";
 import { logInfo } from "../logger.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { splitShellArgs } from "../utils/shell-argv.js";
@@ -1705,7 +1710,7 @@ export function createExecTool(
         }
 
         run.promise
-          .then((outcome) => {
+          .then(async (outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
@@ -1718,13 +1723,41 @@ export function createExecTool(
             if (yielded || run.session.backgrounded) {
               return;
             }
-            resolve(
-              buildExecForegroundResult({
-                outcome,
-                cwd: run.session.cwd,
-                warningText: getWarningText(),
-              }),
-            );
+
+            // Build the result first
+            const result = buildExecForegroundResult({
+              outcome,
+              cwd: run.session.cwd,
+              warningText: getWarningText(),
+            });
+
+            // Claude Code pattern: if output exceeds threshold, persist to disk
+            // and show a preview so the model doesn't get context-bloated.
+            const content = result.content[0];
+            if (
+              content?.type === "text" &&
+              typeof content.text === "string" &&
+              requiresDiskPersistence(content.text)
+            ) {
+              try {
+                const workspace = workdir ?? process.cwd();
+                const toolUseId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+                const { path: persistedPath, size } = await persistToolResult(
+                  workspace,
+                  toolUseId,
+                  content.text,
+                );
+                const preview = generatePreview(content.text);
+                result.content[0] = {
+                  type: "text",
+                  text: `${preview}\n\n[Full output (${size} bytes) persisted to: ${persistedPath}]`,
+                };
+              } catch {
+                // Persistence failed — return the original result (noisy but not fatal)
+              }
+            }
+
+            resolve(result);
           })
           .catch((err) => {
             if (yieldTimer) {
