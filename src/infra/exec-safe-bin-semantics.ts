@@ -1,3 +1,135 @@
+/** Commands that only read data — safe for read-only execution */
+export const BASH_READ_COMMANDS = new Set([
+  "cat",
+  "head",
+  "tail",
+  "grep",
+  "egrep",
+  "fgrep",
+  "wc",
+  "jq",
+  "awk",
+  "sed",
+  "cut",
+  "sort",
+  "uniq",
+  "tr",
+  "column",
+  "expand",
+  "fold",
+  "hexdump",
+  "od",
+  "base64",
+  "md5sum",
+  "sha1sum",
+  "sha256sum",
+  "cmp",
+  "diff",
+  "comm",
+  "join",
+  "paste",
+  "split",
+  "csplit",
+  "find",
+  "locate",
+  "xargs",
+  "which",
+  "type",
+  "command",
+  "builtin",
+  "printf",
+  "echo",
+  "yes",
+  "seq",
+  "factor",
+  "groups",
+  "id",
+  "logname",
+  "whoami",
+  "pwd",
+  "date",
+  "arch",
+  "uname",
+  "uptime",
+  "hostname",
+  "env",
+  "printenv",
+  "test",
+  "[",
+  "sleep",
+  "timeout",
+]);
+
+/** Commands that list/discover files — also read-only */
+export const BASH_LIST_COMMANDS = new Set([
+  "ls",
+  "la",
+  "ll",
+  "dir",
+  "vdir",
+  "tree",
+  "du",
+  "df",
+  "stat",
+  "file",
+  "readlink",
+  "realpath",
+  "path",
+  "dirname",
+  "basename",
+  "mktemp",
+  "mkfifo",
+]);
+
+/** Commands that modify state silently — output suppressed on success */
+export const BASH_SILENT_COMMANDS = new Set([
+  "mv",
+  "cp",
+  "rm",
+  "rmdir",
+  "mkdir",
+  "chmod",
+  "chown",
+  "chgrp",
+  "touch",
+  "ln",
+  "link",
+  "unlink",
+  "mkfs",
+  "mkswap",
+  "dd",
+  "sync",
+  "truncate",
+  "fallocate",
+  "chattr",
+  "setfacl",
+]);
+
+/**
+ * Classify a command pipeline as read-only or write-capable.
+ * Returns "read" if all segments are read/list commands.
+ * Returns "write" if any write operation is detected.
+ * Returns "unknown" if classification cannot be determined.
+ */
+export function classifyCommandPipeline(command: string): "read" | "write" | "unknown" {
+  const segments = command.split("|").map((s) => s.trim());
+  const allRead = segments.every((seg) => {
+    const firstToken = seg.split(/\s+/)[0]?.toLowerCase()?.replace(/^-/, "") ?? "";
+    return BASH_READ_COMMANDS.has(firstToken) || BASH_LIST_COMMANDS.has(firstToken);
+  });
+  if (allRead) {
+    return "read";
+  }
+
+  const writeIndicators =
+    /\b(mv|cp|rm|mkdir|chmod|chown|dd|ln\s+-s|touch|tee|git\s+push|npm\s+install|yarn\s+add|pip\s+install)\b/i;
+  if (writeIndicators.test(command)) {
+    return "write";
+  }
+
+  return "unknown";
+}
+
 export type SafeBinSemanticValidationParams = {
   binName?: string;
   positional: readonly string[];

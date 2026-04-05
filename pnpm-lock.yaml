@@ -391,6 +391,8 @@ importers:
 
   extensions/firecrawl: {}
 
+  extensions/fireworks: {}
+
   extensions/github-copilot: {}
 
   extensions/google: {}

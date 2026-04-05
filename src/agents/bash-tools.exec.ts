@@ -1555,8 +1555,21 @@ export function createExecTool(
         scopeKey: defaults?.scopeKey,
         sessionKey: notifySessionKey,
         timeoutSec: effectiveTimeout,
-        onUpdate,
+        onUpdate: (partialResult) => {
+          // Auto-background: reset timer on ANY output
+          outputReceived = true;
+          if (autoBackgroundTimer) {
+            clearTimeout(autoBackgroundTimer);
+            autoBackgroundTimer = null;
+          }
+          onUpdate?.(partialResult);
+        },
       });
+
+      // Auto-background state — lives at outer scope so onUpdate can reset it
+      const AUTO_BACKGROUND_AFTER_MS = 15_000;
+      let autoBackgroundTimer: NodeJS.Timeout | null = null;
+      let outputReceived = false;
 
       let yielded = false;
       let yieldTimer: NodeJS.Timeout | null = null;
@@ -1596,9 +1609,24 @@ export function createExecTool(
             },
           });
 
+        // Auto-background: fire after 15s of no output, reset on any output.
+        // Lives inside Promise so it has access to resolveRunning.
+        autoBackgroundTimer = setTimeout(() => {
+          if (outputReceived || run.session.backgrounded || yielded) {
+            return;
+          }
+          yielded = true;
+          markBackgrounded(run.session);
+          resolveRunning();
+        }, AUTO_BACKGROUND_AFTER_MS);
+
         const onYieldNow = () => {
           if (yieldTimer) {
             clearTimeout(yieldTimer);
+          }
+          if (autoBackgroundTimer) {
+            clearTimeout(autoBackgroundTimer);
+            autoBackgroundTimer = null;
           }
           if (yielded) {
             return;
@@ -1628,6 +1656,9 @@ export function createExecTool(
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
+            if (autoBackgroundTimer) {
+              clearTimeout(autoBackgroundTimer);
+            }
             if (yielded || run.session.backgrounded) {
               return;
             }
@@ -1642,6 +1673,9 @@ export function createExecTool(
           .catch((err) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
+            }
+            if (autoBackgroundTimer) {
+              clearTimeout(autoBackgroundTimer);
             }
             if (yielded || run.session.backgrounded) {
               return;
