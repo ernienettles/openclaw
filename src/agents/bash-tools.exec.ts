@@ -10,6 +10,7 @@ import {
   resolveExecApprovalsFromFile,
 } from "../infra/exec-approvals.js";
 import { resolveExecSafeBinRuntimePolicy } from "../infra/exec-safe-bin-runtime-policy.js";
+import { classifyCommandPipeline } from "../infra/exec-safe-bin-semantics.js";
 import { sanitizeHostExecEnvWithDiagnostics } from "../infra/host-env-security.js";
 import {
   getShellPathFromLoginShell,
@@ -1539,6 +1540,21 @@ export function createExecTool(
       // before we execute and burn tokens in cron loops.
       await validateScriptFileForShellBleed({ command: params.command, workdir });
 
+      // Preflight: classify the command pipeline to provide read/write context.
+      // This is informational — it lets the operator reason about whether a command
+      // is read-only before approving it in allowlist mode.
+      const pipelineClass = classifyCommandPipeline(params.command);
+      if (pipelineClass === "read") {
+        // no-op: already in the clear
+      } else if (pipelineClass === "write") {
+        // This is a hint only — the actual write enforcement happens through
+        // the allowlist/deny security model. We add it as a warning so it
+        // surfaces in the operator's review.
+        warnings.push(
+          `Note: command pipeline contains write operations (mv/cp/rm/npm install etc.) — this is not a read-only command.`,
+        );
+      }
+
       const run = await runExecProcess({
         command: params.command,
         execCommand: execCommandOverride,
@@ -1562,6 +1578,34 @@ export function createExecTool(
             clearTimeout(autoBackgroundTimer);
             autoBackgroundTimer = null;
           }
+          // Stall watchdog: track output growth for prompt detection
+          const currentSize = run.session.tail?.length ?? 0;
+          if (currentSize !== lastOutputSize) {
+            lastOutputSize = currentSize;
+            if (stallTimer) {
+              clearTimeout(stallTimer);
+              stallTimer = null;
+            }
+            // Restart the stall timer on each output
+            stallTimer = setTimeout(() => {
+              const tail = run.session.tail ?? "";
+              const PROMPT_PATTERNS = [
+                /\(y\/n\)/i,
+                /\[y\/n\]/i,
+                /\[Y\/N\]/i,
+                /Press (any key|Enter)/i,
+                /Do you want to/i,
+                /Continue\?/i,
+                /Overwrite/i,
+              ];
+              const looksLikePrompt = PROMPT_PATTERNS.some((p) => p.test(tail));
+              if (looksLikePrompt) {
+                warnings.push(
+                  `Command may be waiting for input (prompt detected after ${STALL_THRESHOLD_MS / 1000}s of stalled output). Common responses: y / n / Enter / Ctrl+C.`,
+                );
+              }
+            }, STALL_THRESHOLD_MS);
+          }
           onUpdate?.(partialResult);
         },
       });
@@ -1570,6 +1614,11 @@ export function createExecTool(
       const AUTO_BACKGROUND_AFTER_MS = 15_000;
       let autoBackgroundTimer: NodeJS.Timeout | null = null;
       let outputReceived = false;
+
+      // Stall watchdog state — declared at outer scope so onUpdate can update it.
+      const STALL_THRESHOLD_MS = 45_000;
+      let lastOutputSize = 0;
+      let stallTimer: NodeJS.Timeout | null = null;
 
       let yielded = false;
       let yieldTimer: NodeJS.Timeout | null = null;
@@ -1628,6 +1677,10 @@ export function createExecTool(
             clearTimeout(autoBackgroundTimer);
             autoBackgroundTimer = null;
           }
+          if (stallTimer) {
+            clearTimeout(stallTimer);
+            stallTimer = null;
+          }
           if (yielded) {
             return;
           }
@@ -1659,6 +1712,9 @@ export function createExecTool(
             if (autoBackgroundTimer) {
               clearTimeout(autoBackgroundTimer);
             }
+            if (stallTimer) {
+              clearTimeout(stallTimer);
+            }
             if (yielded || run.session.backgrounded) {
               return;
             }
@@ -1676,6 +1732,9 @@ export function createExecTool(
             }
             if (autoBackgroundTimer) {
               clearTimeout(autoBackgroundTimer);
+            }
+            if (stallTimer) {
+              clearTimeout(stallTimer);
             }
             if (yielded || run.session.backgrounded) {
               return;
